@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <title>📝 mdpad-pro - 進階 Markdown 筆記本</title>
+
+  <!-- React + Babel -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Dexie (IndexedDB) -->
+  <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.3/dist/dexie.min.js"></script>
+
+  <!-- CryptoJS -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+
+  <!-- Marked.js (Markdown parser) -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <style>
+    :root {
+      --bg-color: #ffffff;
+      --text-color: #000000;
+      --accent-color: #007bff;
+      --editor-bg: #f9f9f9;
+    }
+    .dark-mode {
+      --bg-color: #1e1e1e;
+      --text-color: #eee;
+      --accent-color: #00bfff;
+      --editor-bg: #2a2a2a;
+    }
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background: var(--bg-color);
+      color: var(--text-color);
+      height: 100vh;
+    }
+    #login {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+    }
+    #login input {
+      padding: 0.5rem;
+      font-size: 1rem;
+      margin: 0.5rem;
+    }
+    .app {
+      display: flex;
+      height: 100vh;
+    }
+    .sidebar {
+      width: 250px;
+      border-right: 1px solid #ccc;
+      background: var(--editor-bg);
+      padding: 1rem;
+      overflow-y: auto;
+    }
+    .sidebar input {
+      width: 100%;
+      padding: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .note-item {
+      cursor: pointer;
+      padding: 0.3rem;
+      border-radius: 5px;
+    }
+    .note-item:hover {
+      background-color: var(--accent-color);
+      color: white;
+    }
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+    .top-bar {
+      padding: 0.5rem 1rem;
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      border-bottom: 1px solid #ccc;
+    }
+    .top-bar input, .top-bar button {
+      padding: 0.5rem;
+    }
+    .editor-area {
+      flex: 1;
+      display: flex;
+      height: 100%;
+    }
+    textarea {
+      flex: 1;
+      padding: 1rem;
+      font-family: monospace;
+      font-size: 1rem;
+      border: none;
+      background: var(--editor-bg);
+      color: var(--text-color);
+      resize: none;
+    }
+    .preview {
+      flex: 1;
+      padding: 1rem;
+      overflow-y: auto;
+      border-left: 1px solid #ccc;
+      background: var(--editor-bg);
+    }
+    .footer {
+      padding: 0.5rem;
+      text-align: center;
+      font-size: 0.85rem;
+      color: gray;
+    }
+    @media print {
+      body * {
+        visibility: hidden;
+      }
+      .preview, .preview * {
+        visibility: visible;
+      }
+      .preview {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: auto;
+        background: white;
+        color: black;
+        padding: 2rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const db = new Dexie("MdPadPro");
+    db.version(1).stores({ notes: "++id,title,tags,encrypted" });
+
+    function App() {
+      const [notes, setNotes] = React.useState([]);
+      const [search, setSearch] = React.useState("");
+      const [theme, setTheme] = React.useState(false);
+      const [currentId, setCurrentId] = React.useState(null);
+      const [title, setTitle] = React.useState("");
+      const [tags, setTags] = React.useState("");
+      const [content, setContent] = React.useState("");
+      const [secret, setSecret] = React.useState("");
+      const [unlocked, setUnlocked] = React.useState(false);
+      const [usage, setUsage] = React.useState({ count: 0, sizeKB: 0 });
+
+      const updateUsage = async () => {
+        const all = await db.notes.toArray();
+        let total = 0;
+        all.forEach(n => {
+          total += JSON.stringify(n).length;
+        });
+        setUsage({ count: all.length, sizeKB: (total / 1024).toFixed(2) });
+      };
+
+      React.useEffect(() => { if (unlocked) loadNotes(); }, [unlocked]);
+      React.useEffect(() => { document.body.classList.toggle("dark-mode", theme); }, [theme]);
+      // 跟隨系統主題
+      React.useEffect(() => {
+          const mq = window.matchMedia("(prefers-color-scheme: dark)");
+          const setSystemTheme = () => setTheme(mq.matches);
+          setSystemTheme();
+          mq.addEventListener("change", setSystemTheme);
+          return () => mq.removeEventListener("change", setSystemTheme);
+      }, []);
+
+      React.useEffect(() => {
+        if (!unlocked) return;
+        const timeout = setTimeout(() => { saveNote(true); }, 2000);
+        return () => clearTimeout(timeout);
+      }, [content, title, tags]);
+
+
+      const loadNotes = async () => {
+        const all = await db.notes.toArray();
+        setNotes(all);
+        updateUsage();
+      };
+
+      const loadNote = async (id) => {
+        const note = await db.notes.get(id);
+        try {
+          const bytes = CryptoJS.AES.decrypt(note.encrypted, secret);
+          const decrypted = bytes.toString(CryptoJS.enc.Utf8);
+          setCurrentId(id);
+          setTitle(note.title);
+          setTags(note.tags || "");
+          setContent(decrypted);
+        } catch {
+          alert("❌ 解密失敗，請確認密碼是否正確。");
+        }
+      };
+
+      const saveNote = async (auto = false) => {
+        const encrypted = CryptoJS.AES.encrypt(content, secret).toString();
+        const data = { title, tags, encrypted };
+        if (currentId) {
+          await db.notes.update(currentId, data);
+        } else if (!auto) {
+          const id = await db.notes.add(data);
+          setCurrentId(id);
+        }
+        if (!auto) loadNotes();
+      };
+
+      const newNote = () => {
+        setTitle(""); setTags(""); setContent(""); setCurrentId(null);
+      };
+
+      const exportJSON = async () => {
+        const all = await db.notes.toArray();
+        const blob = new Blob([JSON.stringify(all, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'mdpad-export.json';
+        a.click();
+      };
+
+      const importJSON = (e) => {
+        const file = e.target.files[0];
+        const reader = new FileReader();
+        reader.onload = async () => {
+          try {
+            const data = JSON.parse(reader.result);
+            await db.notes.bulkPut(data);
+            loadNotes();
+          } catch {
+            alert("❌ 匯入失敗，請確認檔案格式正確。");
+          }
+        };
+        reader.readAsText(file);
+      };
+
+      const exportMarkdown = () => {
+        const blob = new Blob([content], { type: 'text/markdown' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `${title || "untitled"}.md`;
+        a.click();
+      };
+
+      const printPreview = () => {
+        window.print();
+      };
+
+      const exportPDF = () => {
+        const html = `
+          <html><head><title>${title}</title><style>
+          body { font-family: sans-serif; padding: 2rem; }
+          h1 { font-size: 1.5rem; }
+          </style></head><body>
+          <h1>${title}</h1>
+          ${marked.parse(content)}
+          </body></html>
+        `;
+        const win = window.open('', '_blank');
+        win.document.open();
+        win.document.write(html);
+        win.document.close();
+        win.focus();
+        win.print();
+      };
+
+      if (!unlocked) {
+        return (
+          <div id="login">
+            <h2>🔐 請輸入主密碼</h2>
+            <input type="password" placeholder="主密碼" onChange={e => setSecret(e.target.value)} />
+            <button onClick={() => setUnlocked(true)}>🔓 開啟筆記本</button>
+          </div>
+        );
+      }
+
+      const filtered = notes.filter(note => {
+        const tagMatch = note.tags?.toLowerCase().includes(search.toLowerCase());
+        const titleMatch = note.title?.toLowerCase().includes(search.toLowerCase());
+        return tagMatch || titleMatch;
+      });
+
+      return (
+        <div className="app">
+          <div className="sidebar">
+            <input
+              type="text"
+              placeholder="搜尋筆記或標籤..."
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+            />
+            {filtered.map(note => (
+              <div key={note.id} className="note-item" onClick={() => loadNote(note.id)}>
+                📝 {note.title || "(無標題)"} <br/><small>{note.tags}</small>
+              </div>
+            ))}
+            <button onClick={newNote}>➕ 新增筆記</button>
+            <button onClick={() => setTheme(t => !t)}>🌓 主題切換</button>
+            <button onClick={exportJSON}>📤 匯出 JSON</button>
+            <input type="file" accept=".json" onChange={importJSON} />
+            <button onClick={exportMarkdown}>⬇️ 匯出 Markdown</button>
+            <button onClick={printPreview}>🖨️ 列印筆記</button>
+            <button onClick={exportPDF}>🧾 匯出為 PDF</button>
+          </div>
+          <div className="main">
+            <div className="top-bar">
+              <input placeholder="標題" value={title} onChange={e => setTitle(e.target.value)} />
+              <input placeholder="標籤 (以逗號分隔)" value={tags} onChange={e => setTags(e.target.value)} />
+              <button onClick={() => saveNote(false)}>💾 手動儲存</button>
+            </div>
+            <div className="editor-area">
+              <textarea value={content} onChange={e => setContent(e.target.value)} />
+              <div className="preview" dangerouslySetInnerHTML={{ __html: marked.parse(content) }} />
+            </div>
+            <div className="footer">已登入 | 筆記數：{usage.count} 筆，總容量：{usage.sizeKB} KB | mdpad-pro v2 © 2025</div>
+          </div>
+        </div>
+      );
+    }
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
+
