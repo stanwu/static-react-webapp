@@ -215,6 +215,19 @@
         if (!auto) loadNotes();
       };
 
+      const deleteNote = async () => {
+        if (!currentId) return;
+        const confirmDelete = window.confirm("確定要刪除這篇筆記嗎？此動作無法復原。");
+        if (confirmDelete) {
+          await db.notes.delete(currentId);
+          setCurrentId(null);
+          setTitle("");
+          setTags("");
+          setContent("");
+          loadNotes();
+        }
+      };
+
       const newNote = () => {
         setTitle(""); setTags(""); setContent(""); setCurrentId(null);
       };
@@ -304,6 +317,7 @@
               </div>
             ))}
             <button onClick={newNote}>➕ 新增筆記</button>
+            <button onClick={deleteNote}>🗑️ 刪除筆記</button>
             <button onClick={() => setTheme(t => !t)}>🌓 主題切換</button>
             <button onClick={exportJSON}>📤 匯出 JSON</button>
             <input type="file" accept=".json" onChange={importJSON} />
